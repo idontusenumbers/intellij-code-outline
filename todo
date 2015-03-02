@@ -1,0 +1,31 @@
+options:
+extend error highlighting to the full line
+lighten code outside viewport
+
+features:
+pane per editor instead of window, see codeglance EditorPanelInjector
+
+bugs:
+green hover line is covered by 'current line' yellow highlight
+paint 'current line' highlight (yellow by default) into preview
+dragging preview rect centers instead of repositions
+folded code doesnt render the green line hover highlight
+only scrolls to whole lines
+click/drag to scroll when pannel is scrollable
+can't scroll horizontally
+can't resize
+
+
+
+optimization:
+myEditor.getFoldingModel().isOffsetCollapsed(highlighter.getStartOffset()))
+
+
+
+// TODO modifying document doesnt update outline
+// increase line height to 3 for dragging
+// fix scrolling
+// draw folded region background
+// some highlighters dont appear to be working, see main.js
+// change plugin panel injection technique to be at least one level outside where it currently is since the editor is eating middle clicks
+// https://devnet.jetbrains.com/thread/460254

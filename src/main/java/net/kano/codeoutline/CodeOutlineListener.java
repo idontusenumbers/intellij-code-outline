@@ -43,14 +43,12 @@ import java.awt.*;
  */
 public interface CodeOutlineListener {
     /**
-     * Called when the given region of the given code outline image should be
-     * refreshed. If <code>region</code> is <code>null</code>, the entire image
-     * should be refreshed.
+     * Called when the code outline image should be
+     * refreshed.
      *
      * @param image the image to refresh
-     * @param region the region to refresh, or <code>null</code>
      */
-    void shouldRepaint(CodeOutlineImage image, Rectangle region);
+    void shouldRepaint(CodeOutlineImage image);
 
     /**
      * Called when an exception is thrown when managing the code outline image.

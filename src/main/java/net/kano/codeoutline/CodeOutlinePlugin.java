@@ -38,6 +38,7 @@ package net.kano.codeoutline;
 import com.intellij.openapi.components.ApplicationComponent;
 import com.intellij.openapi.components.ServiceManager;
 import com.intellij.openapi.diagnostic.Logger;
+import com.intellij.openapi.fileEditor.FileEditorManagerListener;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.project.ProjectManagerAdapter;
@@ -119,6 +120,11 @@ public class CodeOutlinePlugin
         tw.getContentManager().setSelectedContent(content, false);
 
         twmEx.addToolWindowManagerListener(window.getToolWindowManagerListener());
+
+
+        EditorPanelInjector injector = new EditorPanelInjector(project, this);
+        project.getMessageBus().connect().subscribe(FileEditorManagerListener.FILE_EDITOR_MANAGER, injector);
+
     }
 
     /**
@@ -157,9 +163,11 @@ public class CodeOutlinePlugin
 
     public void writeExternal(Element element) {
         setBooleanValue(element, "animated-scroll", prefs.isAnimated());
+        setBooleanValue(element, "highlight-current-line", prefs.isHighlightLine());
+        setBooleanValue(element, "extend-error-highlights", prefs.isExtendErrorHighlights());
+        setBooleanValue(element, "lighten-code-outside-viewport", prefs.isLightenCodeOutsideViewport());
 
-        setBooleanValue(element, "highlight-current-line",
-                prefs.isHighlightLine());
+
     }
 
     /**

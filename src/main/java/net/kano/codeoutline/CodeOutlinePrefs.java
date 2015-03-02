@@ -42,29 +42,19 @@ import java.beans.PropertyChangeSupport;
  * Holds application-wide preferences for the code outline plugin.
  */
 public class CodeOutlinePrefs {
-    /** For property change listeners. */
+
     private final PropertyChangeSupport pcs = new PropertyChangeSupport(this);
 
-    /** Whether scrolling via the code outline should be animated. */
     private boolean animated = true;
-    /**
-     * Whether the current line should be highlighted in the editor on
-     * mouseover.
-     */
+
     private boolean highlightLine = true;
 
-    /**
-     * Returns whether scrolling via the code outline should be animated.
-     *
-     * @return whether scrolling via the code outline should be animated
-     */
+    private boolean lightenCodeOutsideViewport = true;
+
+    private boolean extendErrorHighlights = true;
+
     public boolean isAnimated() { return animated; }
 
-    /**
-     * Sets whether scrolling via the code outline should be animated.
-     *
-     * @param animated whether scrolling via the code outline should be animated
-     */
     public void setAnimated(boolean animated) {
         boolean old = this.animated;
 
@@ -73,13 +63,6 @@ public class CodeOutlinePrefs {
         pcs.firePropertyChange("animated", old, animated);
     }
 
-    /**
-     * Sets whether the line over which the mouse is hovering in the code
-     * outline should be highlighted in the editor.
-     *
-     * @param highlightLine whether the currently moused-over line in the code
-     *        outline should be highlighted in the editor
-     */
     public void setHighlightLine(boolean highlightLine) {
         boolean old = this.highlightLine;
 
@@ -88,50 +71,35 @@ public class CodeOutlinePrefs {
         pcs.firePropertyChange("highlightLine", old, highlightLine);
     }
 
-    /**
-     * Returns whether the line over which the mouse is hovering in the code
-     * outline should be highlighted in the editor.
-     *
-     * @return whether the currently moused-over line in the code outline should
-     *         be highlighted in the editor
-     */
     public boolean isHighlightLine() { return highlightLine; }
 
-    /**
-     * Adds the given property change listener for all properties.
-     *
-     * @param l a property change listener
-     */
-    public void addPropertyChangeListener(PropertyChangeListener l) {
-        pcs.addPropertyChangeListener(l);
+    public boolean isLightenCodeOutsideViewport() {
+        return lightenCodeOutsideViewport;
     }
-    /**
-     * Adds the given property change listener for the given property.
-     *
-     * @param property the property to listen for
-     * @param l a property change listener
-     */
-    public void addPropertyChangeListener(String property,
-            PropertyChangeListener l) {
-        pcs.addPropertyChangeListener(property, l);
+
+    public void setLightenCodeOutsideViewport(boolean lightenCodeOutsideViewport) {
+        boolean old = this.lightenCodeOutsideViewport;
+
+        this.lightenCodeOutsideViewport = lightenCodeOutsideViewport;
+        pcs.firePropertyChange("lightenCodeOutsideViewport", old, lightenCodeOutsideViewport);
+
     }
-    /**
-     * Removes the given property change listener for the given property.
-     *
-     * @param property the property to stop listening for
-     * @param l a property change listener
-     */
-    public void removePropertyChangeListener(String property,
-            PropertyChangeListener l) {
-        pcs.removePropertyChangeListener(property, l);
+
+    public boolean isExtendErrorHighlights() {
+        return extendErrorHighlights;
     }
-    /**
-     * Removes the given property change listener which was listening for all
-     * properties.
-     *
-     * @param l a property change listener
-     */
-    public void removePropertyChangeListener(PropertyChangeListener l) {
-        pcs.removePropertyChangeListener(l);
+
+    public void setExtendErrorHighlights(boolean extendErrorHighlights) {
+        boolean old = this.extendErrorHighlights;
+        this.extendErrorHighlights = extendErrorHighlights;
+        pcs.firePropertyChange("extendErrorHighlights", old, extendErrorHighlights);
+    }
+
+    public void addPropertyChangeListener(PropertyChangeListener listener) {
+        pcs.addPropertyChangeListener(listener);
+    }
+
+    public void removePropertyChangeListener(PropertyChangeListener listener) {
+        pcs.removePropertyChangeListener(listener);
     }
 }

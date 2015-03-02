@@ -241,8 +241,8 @@ public class CodeOutlineToolWindow extends JPanel {
     private synchronized CodeOutlinePanel openPanel(FileEditor fileEditor, VirtualFile file) {
         final Editor editor = ((TextEditor) fileEditor).getEditor();
         final CodeOutlinePanel panel = editor instanceof EditorEx
-                ? new CodeOutlinePanel(plugin, project, (EditorEx)editor)
-                : new CodeOutlinePanel(plugin, project, editor);
+                ? new CodeOutlinePanel(plugin, (EditorEx)editor)
+                : new CodeOutlinePanel(plugin, editor);
 
         editor2panel.put(fileEditor, panel);
         file2panel.put(file, panel);

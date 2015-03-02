@@ -31,30 +31,41 @@
  *
  *  File created by keith @ Oct 24, 2003
  *  Modified 2011 - 2014, by Ivan Prisyazhniy <john.koepi@gmail.com>
+ *  Modified 2014 - 2015, by Charlie Hayes <cosmotic@gmail.com>
  */
 
 package net.kano.codeoutline;
 
+import com.intellij.codeInsight.daemon.impl.HighlightInfo;
+import com.intellij.openapi.Disposable;
 import com.intellij.openapi.editor.*;
-import com.intellij.openapi.editor.colors.ColorKey;
 import com.intellij.openapi.editor.colors.EditorColors;
-import com.intellij.openapi.editor.event.SelectionEvent;
-import com.intellij.openapi.editor.event.SelectionListener;
-import com.intellij.openapi.editor.event.VisibleAreaEvent;
-import com.intellij.openapi.editor.event.VisibleAreaListener;
+import com.intellij.openapi.editor.event.*;
 import com.intellij.openapi.editor.ex.EditorEx;
+import com.intellij.openapi.editor.ex.FoldingListener;
+import com.intellij.openapi.editor.ex.MarkupModelEx;
+import com.intellij.openapi.editor.ex.RangeHighlighterEx;
+import com.intellij.openapi.editor.impl.DocumentMarkupModel;
+import com.intellij.openapi.editor.impl.event.MarkupModelListener;
 import com.intellij.openapi.editor.markup.MarkupModel;
 import com.intellij.openapi.editor.markup.RangeHighlighter;
 import com.intellij.openapi.editor.markup.TextAttributes;
 import com.intellij.openapi.project.Project;
+import com.intellij.ui.JBColor;
+import com.intellij.util.ui.UIUtil;
+import org.jetbrains.annotations.NotNull;
 
 import javax.swing.*;
 import javax.swing.event.PopupMenuEvent;
 import javax.swing.event.PopupMenuListener;
 import java.awt.*;
 import java.awt.event.*;
+import java.awt.geom.Area;
+import java.awt.image.BufferedImage;
 import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
+import java.util.*;
+import java.util.List;
 
 /**
  * A code outline panel for a single text editor. The code outline panel manages
@@ -62,162 +73,120 @@ import java.beans.PropertyChangeListener;
  * painting the selection and visible region, scrolling, configuration UI, and
  * highlighting the current line.
  */
-public class CodeOutlinePanel extends JPanel {
-    /** A set of text attributes for highlighting the currently hovered line. */
+
+public class CodeOutlinePanel extends JPanel implements Disposable {
+    /**
+     * A set of text attributes for highlighting the currently hovered line.
+     */
     private static final TextAttributes CURRENTLINE_ATTRIBUTES
             = new TextAttributes(null, new Color(220, 255, 220), null,
-                    null, Font.PLAIN);
+            null, Font.PLAIN);
 
-    /** The code outline plugin instance which instantiated this panel. */
-    private final CodeOutlinePlugin plugin;
-    /** The project for which this code outline panel is shown. */
-    private final Project project;
-    /** The editor whose code is outlined in this panel. */
-    private final Editor editor;
-    /** The set of code outline preferences to obey. */
-    private final CodeOutlinePrefs prefs;
 
-    /** The selection offset, for use in Shift+Mouse1 dragging. */
-    private int selectionOffset = -1;
+    private final CodeOutlinePlugin plugin; // The code outline plugin instance which instantiated this panel.
+    private final Project project; // The project for which this code outline panel is shown.
+    private final EditorEx editor; // The editor whose code is outlined in this panel.
+    private final MarkupModelEx markupModel;
+    private final CodeOutlinePrefs prefs; // The set of code outline preferences to obey.
+    private final Set<RangeHighlighterEx> highlighters;
+    private RangeHighlighter highlighter; // The range highlighter used to highlight the currently hovered line.
+    private final CodeOutlineImage image; // The text outline image used in this panel.
+    private JPopupMenu contextMenu = new JPopupMenu(); // The context menu that appears when right-clicking the code outline.
+    private Point lastMousePoint = null; // The last position of the mouse on the code outline panel, or null if the mouse is not hovering over the panel.
+    private Rectangle previousViewport = null; // The old viewport before the preview was invoked
+    private Point beforePreview;
+    private JCheckBoxMenuItem animatedScrollingMenuItem = new JCheckBoxMenuItem(new AnimateOptionAction());
+    private JCheckBoxMenuItem highlightCurrentLineMenuItem = new JCheckBoxMenuItem(new HighlightOptionAction());
+    private JCheckBoxMenuItem extendErrorHighlightsMenuItem = new JCheckBoxMenuItem(new ExtendErrorHighlightsOptionAction());
+    private JCheckBoxMenuItem lightenCodeOutsideViewportMenuItem = new JCheckBoxMenuItem(new LightenCodeOutsideViewportOptionAction());
 
-    /** The range highlighter used to highlight the currently hovered line. */
-    private RangeHighlighter highlighter;
 
-    /** The text outline image used in this panel. */
-    private final CodeOutlineImage image;
-
-    /** The context menu that appears when right-clicking the code outline. */
-    private JPopupMenu contextMenu = new JPopupMenu();
-
-    /** A listener for IDEA editor scrolling events. */
+    /**
+     * A listener for IDEA editor scrolling events.
+     */
     private VisibleAreaListener scrollListener = new VisibleAreaListener() {
-        /** The last calculated visible area shading rectangle. */
-        private Rectangle rold;
-
         public void visibleAreaChanged(VisibleAreaEvent e) {
-            // we need to repaint the old visible area and the new visible area
-            // for some reason calling getImgRepaintRect(e.getOldRectangle())
-            // just doesn't work right, so we cache it in rold
-            Rectangle rnew = image.getImgRepaintRect(e.getNewRectangle());
-            if (rold != null) {
-                repaint(rold);
-            } else {
-                // if we haven't recorded an old viewing rectangle yet, we can
-                // try to use the given one
-                Rectangle oldview = e.getOldRectangle();
-                if (oldview != null) {
-                    Rectangle old = image.getImgRepaintRect(oldview);
-                    if (old != null) {
-                        old.grow(1, 1);
-                        repaint(old);
-                    }
-                }
-            }
-            if (rnew != null) {
-                // the visible area box has the same dimensions as
-                // getImgRepaintRect returns, so we paint one pixel out in each
-                // direction
-                rnew.grow(1, 1);
-                repaint(rnew);
-            }
-            rold = rnew;
+            repaint();
         }
     };
-    /** A listener for IDEA editor text selection events. */
+    /**
+     * A listener for IDEA editor text selection events.
+     */
     private SelectionListener selectListener = new SelectionListener() {
         public void selectionChanged(SelectionEvent e) {
-            // repaint the old selection area and the new selection area
-            Rectangle rold = image.getImgRepaintRect(e.getOldRange());
-            if (rold != null) repaint(rold);
-            Rectangle rnew = image.getImgRepaintRect(e.getNewRange());
-            if (rnew != null) repaint(rnew);
+            repaint();
         }
     };
-    /** A listener for mouse events in this code outline panel. */
+    /**
+     * A listener for IDEA editor caret selection events.
+     */
+    private CaretListener caretListener = new CaretListener() {
+        public void caretPositionChanged(CaretEvent caretEvent) {
+            repaint();
+        }
+
+        public void caretAdded(CaretEvent caretEvent) {
+            repaint();
+        }
+
+        public void caretRemoved(CaretEvent caretEvent) {
+            repaint();
+        }
+    };
+
+    /**
+     * A listener for IDEA folding model events.
+     */
+    private FoldingListener foldingListener = new FoldingListener() {
+        @Override
+        public void onFoldRegionStateChange(@NotNull FoldRegion foldRegion) {
+
+        }
+
+        @Override
+        public void onFoldProcessingEnd() {
+            image.refreshImage();
+            repaint();
+        }
+    };
+
+    /**
+     * A listener for mouse events in this code outline panel.
+     */
     private MouseListener mouseListener = new MouseAdapter() {
-        /**
-         * The horizontal scrolling position when the user began to Preview
-         * Scroll.
-         */
-        private int origscrollh = -1;
-        /**
-         * The vertical scrolling position when the user began to Preview
-         * Scroll.
-         */
-        private int origscrollv = -1;
-        /**
-         * Whether the scrolling mechanism should smooth scroll when returning
-         * to the original scrolling position after Preview Scrolling.
-         */
+        // The scrolling position when the user began to Preview Scroll.
+        // Whether the scrolling mechanism should smooth scroll when returning to the original scrolling position after Preview Scrolling.
         private boolean slideBack = false;
 
         public void mousePressed(MouseEvent e) {
             Point point = e.getPoint();
 
-            double scale = image.getScale();
-            if (scale < 1.0) {
-                point = new Point(point.x, CodeOutlineImage.getOutScaledLine(point.y, scale));
-            }
 
             if (SwingUtilities.isLeftMouseButton(e)) {
-                // left mouse button always moves the cursor to the clicked
-                // position, but what else it does varies
-
-                // we don't want to animate if Ctrl is being held down (that's
-                // what Ctrl does)
-                boolean animate = !e.isControlDown();
-
-                // we want to unfold the region where the user clicked if the
-                // user double-clicked or if he is holding Shift to select text
-                // (I think the user wants this to happen if he is selecting
-                // text)
-                boolean multiclick = e.getClickCount() >= 2;
-                boolean shiftDown = e.isShiftDown();
-
-                seekTo(point, animate, multiclick || shiftDown);
-
                 // we want to reset the original scroll position to reset
                 // Preview Scroll. this only matters when the user clicks with
                 // the left mouse button while still holding down the middle
                 // button - in this case, he probably wants to stop Preview
                 // Scrolling.
-                origscrollh = -1;
-                origscrollv = -1;
+                beforePreview = null;
 
-                if (shiftDown) {
-                    // if the user is holding shift, we want to start a
-                    // selection
-                    updateSelection(point, true);
-                } else {
-                    // if the user is not holding shift, the selection should
-                    // be cleared just like if the user left-clicked somewhere
-                    // in the editor itself
-                    editor.getSelectionModel().removeSelection();
-                }
-
+                scrollTo(point);
             } else if (SwingUtilities.isRightMouseButton(e)) {
                 // the right mouse button shows the context menu
                 contextMenu.show(CodeOutlinePanel.this, e.getX(), e.getY());
 
             } else if (SwingUtilities.isMiddleMouseButton(e)) {
-                // the middle mouse button is Preview Scroll - it scrolls while
-                // dragging, then resets the scroll position when you release
-                // the mouse button
-                ScrollingModel sm = editor.getScrollingModel();
 
-                // we want to save the scroll positions when smooth scrolling is
-                // complete. otherwise, repeatedly middle-clicking too quickly
-                // ends up storing an intermediate value in origscrollh and
-                // origscrollv, causing the final scroll region to move.
-                Rectangle vis = sm.getVisibleAreaOnScrollingFinished();
-                origscrollh = vis.x;
-                origscrollv = vis.y;
+//                //TODO IDEA seems to be doing something fishy which is eating the mouse release.
+//                // if Ctrl is being held down, we don't want to "slide" or
+//                // smooth scroll; we want to skip back and forth non-smoothly
+//                beforePreview = getCurrentLogicalScrollPosition();
+//                slideBack = !e.isControlDown();
+//
+//                scrollTo(point, slideBack);
 
-                // if Ctrl is being held down, we don't want to "slide" or
-                // smooth scroll; we want to skip back and forth non-smoothly
-                slideBack = !e.isControlDown();
 
-                previewTo(point, slideBack);
+
             }
         }
 
@@ -226,69 +195,52 @@ public class CodeOutlinePanel extends JPanel {
                 // when the user releases the left mouse button, the selection
                 // is finalized and the cursor goes to the specified mouse
                 // position
-                Point point = e.getPoint();
 
-                double scale = image.getScale();
-                if (scale < 1.0) {
-                    point = new Point(point.x, CodeOutlineImage.getOutScaledLine(point.y, scale));
-                }
-
-                seekTo(point, true, e.isShiftDown());
-
-                updateSelection(point, false);
-                selectionOffset = -1;
-
-                origscrollh = -1;
-                origscrollv = -1;
+                beforePreview = null;
 
             } else if (SwingUtilities.isMiddleMouseButton(e)) {
                 // when the user releases the middle mouse button, Preview
                 // Scrolling is complete, and the document should be scrolled
                 // back to where it was when the user started Preview Scrolling
 
-                // origscrollh and origscrollv could have been reset while the
+                // beforePreview could have been reset while the
                 // user was Preview Scrolling. if this happened, we don't have
                 // to do anything
-                if (origscrollh == -1) return;
 
-                scrollToXY(origscrollh, origscrollv, this.slideBack);
+                previousViewport = null;
 
-                origscrollh = -1;
-                origscrollv = -1;
+                if (beforePreview != null)
+                    scrollToLogical(beforePreview, this.slideBack);
+
+                beforePreview = null;
             }
         }
 
         public void mouseExited(MouseEvent e) {
             // when the mouse exits the code outline panel, the currently
             // hovered line must be de-highlighted
-            mouseout();
+
+            synchronized (CodeOutlinePanel.this) {
+                lastMousePoint = null;
+                clearHighlightedLine();
+            }
         }
     };
-    /** A mouse motion listener for this code outline panel. */
+    /**
+     * A mouse motion listener for this code outline panel.
+     */
     private MouseMotionListener mouseMotionListener
             = new MouseMotionListener() {
         public void mouseDragged(MouseEvent e) {
             Point point = e.getPoint();
 
-            double scale = image.getScale();
-            if (scale < 1.0) {
-                point = new Point(point.x, CodeOutlineImage.getOutScaledLine(point.y, scale));
-            }
-
             // the currently hovered line needs to be updated
             mouseover(point);
 
-            if (SwingUtilities.isLeftMouseButton(e)) {
-                // dragging with the left mouse button should move the cursor
-                // and update the selected text region, if the user is creating
-                // a selection by holding Shift
-                seekTo(point, false, false);
-                updateSelection(point, false);
-
-            } else if (SwingUtilities.isMiddleMouseButton(e)) {
+            if (SwingUtilities.isLeftMouseButton(e) || SwingUtilities.isMiddleMouseButton(e)) {
                 // dragging with the middle mouse button should Preview Scroll
                 // to the given location
-                previewTo(point, false);
+                scrollTo(point, false);
             }
         }
 
@@ -298,7 +250,9 @@ public class CodeOutlinePanel extends JPanel {
             mouseover(e.getPoint());
         }
     };
-    /** A mouse wheel listener for the code ouline panel. */
+    /**
+     * A mouse wheel listener for the code ouline panel.
+     */
     private MouseWheelListener mouseWheelListener = new MouseWheelListener() {
         public void mouseWheelMoved(MouseWheelEvent e) {
             ScrollingModel sm = editor.getScrollingModel();
@@ -307,8 +261,8 @@ public class CodeOutlinePanel extends JPanel {
             try {
                 sm.disableAnimation();
                 // scroll one page up/down for each mouse wheel click
-                sm.scrollVertically(sm.getVerticalScrollOffset()
-                        + (e.getWheelRotation() * sm.getVisibleArea().height));
+                sm.scrollVertically((int) (sm.getVerticalScrollOffset()
+                        + (e.getPreciseWheelRotation() * sm.getVisibleArea().height)));
             } finally {
                 sm.enableAnimation();
             }
@@ -319,8 +273,8 @@ public class CodeOutlinePanel extends JPanel {
      * changes in the text outline.
      */
     private CodeOutlineListener repaintListener = new CodeOutlineListener() {
-        public void shouldRepaint(CodeOutlineImage image, Rectangle region) {
-            repaint(region);
+        public void shouldRepaint(CodeOutlineImage image) {
+            repaint();
         }
 
         public void handleException(CodeOutlineImage image, Exception e) {
@@ -332,19 +286,13 @@ public class CodeOutlinePanel extends JPanel {
      * A property change listener for detecting changes in the currently hovered
      * line highlighting option.
      */
-    private PropertyChangeListener highlightPrefListener
+    private PropertyChangeListener prefListener
             = new PropertyChangeListener() {
-                public void propertyChange(PropertyChangeEvent evt) {
-                    updateHighlightedLine();
-                }
-            };
+        public void propertyChange(PropertyChangeEvent evt) {
+            refresh();
+        }
+    };
 
-    /** The "Animated Scrolling" menu item. */
-    private JCheckBoxMenuItem animatedMenuItem
-            = new JCheckBoxMenuItem(new AnimateOptionAction());
-    /** The "Highlight Current Line" menu item. */
-    private JCheckBoxMenuItem highlightMenuItem
-            = new JCheckBoxMenuItem(new HighlightOptionAction());
 
     { // init
         // we are already buffering the text outline. when painting, we mostly
@@ -352,40 +300,60 @@ public class CodeOutlinePanel extends JPanel {
         // fast, so we don't need to double-buffer the panel itself
         setDoubleBuffered(false);
 
-        // changes in the the "Animated Scrolling" checkbox should be reflected
-        // in our preferences object
-        animatedMenuItem.addPropertyChangeListener("selected",
+        animatedScrollingMenuItem.addPropertyChangeListener("selected",
                 new PropertyChangeListener() {
-            public void propertyChange(PropertyChangeEvent evt) {
-                boolean animated = ((Boolean) evt.getNewValue()).booleanValue();
-                prefs.setAnimated(animated);
-            }
-        });
-        // changes in the the "Highlight Current Line" checkbox should be
-        // reflected in our preferences object
-        highlightMenuItem.addPropertyChangeListener("selected",
-                new PropertyChangeListener() {
-            public void propertyChange(PropertyChangeEvent evt) {
-                boolean highlighted
-                        = ((Boolean) evt.getNewValue()).booleanValue();
-                prefs.setHighlightLine(highlighted);
-            }
-        });
+                    public void propertyChange(PropertyChangeEvent evt) {
+                        boolean animated = (Boolean) evt.getNewValue();
+                        prefs.setAnimated(animated);
+                    }
+                });
 
-        contextMenu.add(animatedMenuItem);
-        contextMenu.add(highlightMenuItem);
+        highlightCurrentLineMenuItem.addPropertyChangeListener("selected",
+                new PropertyChangeListener() {
+                    public void propertyChange(PropertyChangeEvent evt) {
+                        boolean highlighted = (Boolean) evt.getNewValue();
+                        prefs.setHighlightLine(highlighted);
+                    }
+                });
+
+        extendErrorHighlightsMenuItem.addPropertyChangeListener("selected",
+                new PropertyChangeListener() {
+                    public void propertyChange(PropertyChangeEvent evt) {
+                        boolean highlighted = (Boolean) evt.getNewValue();
+                        prefs.setExtendErrorHighlights(highlighted);
+                    }
+                });
+
+        lightenCodeOutsideViewportMenuItem.addPropertyChangeListener("selected",
+                new PropertyChangeListener() {
+                    public void propertyChange(PropertyChangeEvent evt) {
+                        boolean highlighted = (Boolean) evt.getNewValue();
+                        prefs.setLightenCodeOutsideViewport(highlighted);
+                    }
+                });
+
+
+
+        contextMenu.add(animatedScrollingMenuItem);
+        contextMenu.add(highlightCurrentLineMenuItem);
+        contextMenu.add(extendErrorHighlightsMenuItem);
+        contextMenu.add(lightenCodeOutsideViewportMenuItem);
         contextMenu.addSeparator();
         contextMenu.add(new RefreshAction());
         // the context menu's checkboxes are only updated from the code outline
         // preferences object when they are needed (before the menu is shown)
         contextMenu.addPopupMenuListener(new PopupMenuListener() {
-            public void popupMenuCanceled(PopupMenuEvent e) { }
+            public void popupMenuCanceled(PopupMenuEvent e) {
+            }
 
-            public void popupMenuWillBecomeInvisible(PopupMenuEvent e) { }
+            public void popupMenuWillBecomeInvisible(PopupMenuEvent e) {
+            }
 
             public void popupMenuWillBecomeVisible(PopupMenuEvent e) {
-                animatedMenuItem.setSelected(prefs.isAnimated());
-                highlightMenuItem.setSelected(prefs.isHighlightLine());
+                animatedScrollingMenuItem.setSelected(prefs.isAnimated());
+                highlightCurrentLineMenuItem.setSelected(prefs.isHighlightLine());
+                extendErrorHighlightsMenuItem.setSelected(prefs.isExtendErrorHighlights());
+                lightenCodeOutsideViewportMenuItem.setSelected(prefs.isLightenCodeOutsideViewport());
             }
         });
 
@@ -398,17 +366,50 @@ public class CodeOutlinePanel extends JPanel {
      * Creates a new code outline panel for the given plugin, project, and
      * editor.
      *
-     * @param plugin a code outline plugin instance
-     * @param project the project with which this panel is associated
-     * @param editor the editor whose contents this panel outlines
+     * @param plugin  a code outline plugin instance
+     * @param editor  the editor whose contents this panel outlines
      */
-    public CodeOutlinePanel(CodeOutlinePlugin plugin, Project project,
-                            EditorEx editor) {
+    public CodeOutlinePanel(CodeOutlinePlugin plugin, EditorEx editor) {
         this.plugin = plugin;
-        this.project = project;
+        this.project = editor.getProject();
         this.editor = editor;
         this.image = new CodeOutlineImageEx(editor, repaintListener);
         this.prefs = plugin.getPrefs();
+        this.markupModel = (MarkupModelEx) DocumentMarkupModel.forDocument(editor.getDocument(), editor.getProject(), true);
+
+        highlighters = //new HashSet<RangeHighlighterEx>();
+                new TreeSet<RangeHighlighterEx>(new Comparator<RangeHighlighterEx>() {
+
+                    public int compare(RangeHighlighterEx o1, RangeHighlighterEx o2) {
+                        return o1.getAffectedAreaStartOffset() - o2.getAffectedAreaStartOffset();
+                    }
+                });
+
+
+        markupModel.addMarkupModelListener(this, new MarkupModelListener() {
+            public void afterAdded(@NotNull RangeHighlighterEx rangeHighlighterEx) {
+                highlighters.add(rangeHighlighterEx);
+                repaint();
+            }
+
+            public void beforeRemoved(@NotNull RangeHighlighterEx rangeHighlighterEx) {
+                highlighters.remove(rangeHighlighterEx);
+                repaint();
+            }
+
+            @Override
+            public void attributesChanged(@NotNull RangeHighlighterEx rangeHighlighterEx, boolean b) {
+                repaint();
+            }
+
+        });
+        UIUtil.invokeLaterIfNeeded(new Runnable() {
+            public void run() {
+                for (RangeHighlighter rangeHighlighter : markupModel.getAllHighlighters()) {
+                    highlighters.add((RangeHighlighterEx) rangeHighlighter);
+                }
+            }
+        });
 
         init();
     }
@@ -417,28 +418,23 @@ public class CodeOutlinePanel extends JPanel {
      * Creates a new code outline panel for the given plugin, project, and
      * editor.
      *
-     * @param plugin a code outline plugin instance
-     * @param project the project with which this panel is associated
-     * @param editor the editor whose contents this panel outlines
+     * @param plugin  a code outline plugin instance
+     * @param editor  the editor whose contents this panel outlines
      */
-    public CodeOutlinePanel(CodeOutlinePlugin plugin, Project project,
-            Editor editor) {
-        this.plugin = plugin;
-        this.project = project;
-        this.editor = editor;
-        this.image = new CodeOutlineImage(editor, repaintListener);
-        this.prefs = plugin.getPrefs();
-
-        init();
+    public CodeOutlinePanel(CodeOutlinePlugin plugin, Editor editor) {
+        this(plugin, (EditorEx) editor);
+        //TODO figure out when this might be called, i think this is for old versions which wont work with the new code highliting features
     }
 
     /**
      * Initializes listeners.
      */
     private void init() {
-        prefs.addPropertyChangeListener("highlightLine", highlightPrefListener);
+        prefs.addPropertyChangeListener(prefListener);
         editor.getScrollingModel().addVisibleAreaListener(scrollListener);
         editor.getSelectionModel().addSelectionListener(selectListener);
+        editor.getCaretModel().addCaretListener(caretListener);
+        editor.getFoldingModel().addListener(foldingListener, this);
     }
 
     /**
@@ -447,101 +443,11 @@ public class CodeOutlinePanel extends JPanel {
      */
     public void dispose() {
         image.dispose();
-        prefs.removePropertyChangeListener("highlightLine",
-                highlightPrefListener);
+
+        prefs.removePropertyChangeListener(prefListener);
         editor.getScrollingModel().removeVisibleAreaListener(scrollListener);
         editor.getSelectionModel().removeSelectionListener(selectListener);
-    }
-
-    /**
-     * Moves the caret to the end of the line corresponding to the given
-     * position, with the given options. If the user has selected not to animate
-     * scrolling, the value of <code>animate</code> is ignored. If
-     * <code>insideCollapsed</code> is <code>false</code>, the cursor will be
-     * placed at either the beginning of the folding region or at the end of the
-     * line on which the folding region ends.
-     * <br><br>
-     * TODO: This method does not support seeking inside a collapsed folding
-     * region which is not the last folding region on the line gracefully.
-     *
-     * @param point the point in the code outline panel whose corresponding
-     *        location should be the new caret position
-     * @param animate whether any scrolling involved in seeking should be
-     *        animated
-     * @param insideCollapsed whether the cursor should be placed within
-     *        collapsed folding regions
-     */
-    private void seekTo(Point point, boolean animate, boolean insideCollapsed) {
-        LogicalPosition pos = image.getPositionFromPoint(point);
-        int offset = getEndOfLineOffset(pos);
-        seekTo(offset, insideCollapsed);
-        scrollTo(pos, animate);
-    }
-
-    /**
-     * Moves the caret to the given position, with the given options. If the
-     * user has selected not to animate scrolling, the value of
-     * <code>animate</code> is ignored. If <code>insideCollapsed</code> is
-     * <code>false</code>, the cursor will be placed at either the beginning of
-     * the folding region or at the end of the line on which the folding region
-     * ends.
-     *
-     * @param offset the offset to set as the new caret position
-     * @param insideCollapsed whether the cursor should be placed within
-     *        collapsed folding regions
-     */
-    private void seekTo(int offset, boolean insideCollapsed) {
-        FoldingModel fm = editor.getFoldingModel();
-        if (!insideCollapsed && fm.isOffsetCollapsed(offset)) {
-            // we need to find a nearby offset which is not inside a collapsed
-            // folding region
-            int oldoff = offset;
-            offset = findUncollapsedOffset(offset);
-            if (oldoff > offset) {
-                // if the offset we found is past the original offset, we can
-                // safely skip to the end of the line. doing so otherwise might
-                // cause an infinite loop going back and forth.
-                offset = getEndOfLineOffset(
-                        editor.offsetToLogicalPosition(offset));
-            }
-        }
-
-        editor.getCaretModel().moveToOffset(offset);
-    }
-
-    /**
-     * Returns an offset into the document which describes the end of the line
-     * given in the given <code>LogicalPosition</code>.
-     *
-     * @param pos a position
-     * @return the offset into the document at the end of the line on which the
-     *         given position lies
-     */
-    private int getEndOfLineOffset(LogicalPosition pos) {
-        LogicalPosition nextline = new LogicalPosition(pos.line+1, 0);
-        int offset = editor.logicalPositionToOffset(nextline);
-        return Math.max(0, offset - 1);
-    }
-
-    /**
-     * Returns an offset into the document near the given offset which is not in
-     * a collapsed folding region. If none can be found, the offset
-     * <code>0</code> is returned.
-     *
-     * @param offset an offset
-     * @return an offset near the given offset which is not collapsed
-     */
-    private int findUncollapsedOffset(int offset) {
-        FoldingModel fm = editor.getFoldingModel();
-        int last = editor.getDocument().getTextLength();
-        for (int i = offset; i <= last; i++) {
-            if (!fm.isOffsetCollapsed(i)) return i;
-        }
-        for (int i = offset; i >= 0; i--) {
-            if (!fm.isOffsetCollapsed(i)) return i;
-        }
-
-        return 0;
+        editor.getCaretModel().removeCaretListener(caretListener);
     }
 
     /**
@@ -549,13 +455,20 @@ public class CodeOutlinePanel extends JPanel {
      * animate code outline scrolling operations, the value of
      * <code>animate</code> is ignored.
      *
-     * @param point a point in the code outline panel corresponding to the
-     *        position to scroll to
+     * @param point   a point in the code outline panel corresponding to the
+     *                position to scroll to
      * @param animate whether the scrolling should be animated
      */
-    private void previewTo(Point point, boolean animate) {
-        LogicalPosition pos = image.getPositionFromPoint(point);
+    private void scrollTo(Point point, boolean animate) {
+        int x = Math.max(0, point.y /2);
+        int y = Math.max(0, point.x /2);
+        x = Util.getLinePlusFolds(editor, x);
+        LogicalPosition pos = new LogicalPosition(x , y );
         scrollTo(pos, animate);
+    }
+
+    private void scrollTo(Point point) {
+        scrollTo(point, prefs.isAnimated());
     }
 
     /**
@@ -573,37 +486,25 @@ public class CodeOutlinePanel extends JPanel {
      * Scrolls to the given coordinates. If the user has chosen not to animate
      * scrolling operations, the value of <code>animate</code> is ignored.
      *
-     * @param scrollh the x-axis position, in pixels
-     * @param scrollv the y-axis position, in pixels
+     * @param p       point to make top loeft
      * @param animate whether this operation should be animated
      */
-    private void scrollToXY(int scrollh, int scrollv, boolean animate) {
+    private void scrollToLogical(Point p, boolean animate) {
         ScrollingModel sm = editor.getScrollingModel();
         boolean cut = shouldCut(animate);
         try {
             if (cut) sm.disableAnimation();
-            sm.scrollHorizontally(scrollh);
-            sm.scrollVertically(scrollv);
+            sm.scrollHorizontally(p.x);
+            sm.scrollVertically(p.y);
         } finally {
             if (cut) sm.enableAnimation();
         }
     }
 
-    /**
-     * Scrolls to make the editor caret visible. If the user has chosen not to
-     * animate scrolling operations, the value of <code>animate</code> is ignored.
-     *
-     * @param animate whether this operation should be animated
-     */
-    private void scrollToCaret(boolean animate) {
+    private Point getCurrentLogicalScrollPosition(){
         ScrollingModel sm = editor.getScrollingModel();
-        boolean cut = shouldCut(animate);
-        try {
-            if (cut) sm.disableAnimation();
-            sm.scrollToCaret(ScrollType.MAKE_VISIBLE);
-        } finally {
-            if (cut) sm.enableAnimation();
-        }
+        return new Point(sm.getHorizontalScrollOffset(),sm.getVerticalScrollOffset());
+
     }
 
     /**
@@ -611,7 +512,7 @@ public class CodeOutlinePanel extends JPanel {
      * has chosen not to animate scrolling operations, the value of
      * <code>animate</code> is ignored.
      *
-     * @param pos the position to scroll to
+     * @param pos     the position to scroll to
      * @param animate whether this operation should be animated
      */
     private void scrollTo(LogicalPosition pos, boolean animate) {
@@ -621,58 +522,26 @@ public class CodeOutlinePanel extends JPanel {
             if (cut) sm.disableAnimation();
             // Handy centring by x-axis
             // This is work around for use of MAKE_VISIBLE
-            Point targetPoint = editor.logicalPositionToXY(pos);
-            int viewX = sm.getVisibleArea().x;
-            int viewWidth = sm.getVisibleArea().width;
-            int deltaX = targetPoint.x - (viewX + viewWidth / 2);
-            if (deltaX > 0) {
-                LogicalPosition pos2 = editor.xyToLogicalPosition(new Point(viewX + viewWidth + deltaX, 0));
-                pos = new LogicalPosition(pos.line, pos2.column - 5);
-            } else {
-                int newX = Math.max(0, viewX + deltaX);
-                LogicalPosition pos2 = editor.xyToLogicalPosition(new Point(newX, 0));
-                pos = new LogicalPosition(pos.line, pos2.column);
-            }
+//            Point targetPoint = editor.logicalPositionToXY(pos);
+//            int viewX = sm.getVisibleArea().x;
+//            int viewWidth = sm.getVisibleArea().width;
+//            int deltaX = targetPoint.x - (viewX + viewWidth / 2);
+//            if (deltaX > 0) {
+//                LogicalPosition pos2 = editor.xyToLogicalPosition(new Point(viewX + viewWidth + deltaX, 0));
+//                pos = new LogicalPosition(pos.line, pos2.column - 5);
+//            } else {
+//                int newX = Math.max(0, viewX + deltaX);
+//                LogicalPosition pos2 = editor.xyToLogicalPosition(new Point(newX, 0));
+//                pos = new LogicalPosition(pos.line, pos2.column);
+//            }
             // Don't know why MAKE_CENTER does wrong.
-            sm.scrollTo(pos, ScrollType.MAKE_VISIBLE);
+
+            sm.scrollTo(pos, ScrollType.CENTER);
         } finally {
             if (cut) sm.enableAnimation();
         }
     }
 
-    /**
-     * Updates the text selection region using the given code outline panel
-     * coordinates. If no original selection offset is set, the value of
-     * <code>create</code> determines whether a selection will be created (if
-     * <code>create</code> is <code>true</code>) or no change will be made to
-     * the selection (if <code>create</code> is <code>false</code>).
-     *
-     * @param point a point in the code outline panel
-     * @param create whether to create an initial selection offset if none is
-     *        set
-     */
-    private void updateSelection(Point point, boolean create) {
-        SelectionModel sm = editor.getSelectionModel();
-        LogicalPosition pos = image.getPositionFromPoint(point);
-        int off = editor.logicalPositionToOffset(pos);
-        if (selectionOffset == -1) {
-            // no initial selection offset has been set, so no selection can
-            // be made. we can set the selection offset, though, if create is
-            // true.
-            if (!create) return;
-            selectionOffset = off;
-        }
-
-        // set the selection from the lowest offset to the highest
-        if (off > selectionOffset) sm.setSelection(selectionOffset, off);
-        else sm.setSelection(off, selectionOffset);
-    }
-
-    /**
-     * The last position of the mouse on the code outline panel, or
-     * <code>null</code> if the mouse is not hovering over the panel.
-     */
-    private Point lastMousePoint = null;
 
     /**
      * Highlights the line associated with the given code outline panel
@@ -687,22 +556,10 @@ public class CodeOutlinePanel extends JPanel {
         highlightCurrentLine();
     }
 
-    /**
-     * Resets the last mouse point field and erases any highlighted line.
-     */
-    private synchronized void mouseout() {
-        lastMousePoint = null;
-
-        clearHighlightedLine();
-    }
-
-    /**
-     * Currently scale factor is static 1:1
-     */
     private int getLineFromMousePointY(int mousePointY) {
-        return mousePointY;
+        return mousePointY / 2; // Two pixels of preview per line, plus one blank line of pixels between each line of text
     }
-    
+
     /**
      * Highlights the line specified by <code>lastMousePoint</code>. This method
      * does nothing if <code>lastMousePoint</code> is <code>null</code>.
@@ -713,6 +570,8 @@ public class CodeOutlinePanel extends JPanel {
         clearHighlightedLine();
         MarkupModel mm = editor.getMarkupModel();
         int line = getLineFromMousePointY(lastMousePoint.y);
+
+        line = Util.getLinePlusFolds(editor, line);
         if (line >= 0 && line < editor.getDocument().getLineCount()) {
             highlighter = mm.addLineHighlighter(line, 100, CURRENTLINE_ATTRIBUTES);
         }
@@ -744,53 +603,29 @@ public class CodeOutlinePanel extends JPanel {
     /**
      * Draws a selection block between the two given positions.
      *
-     * @param g the graphics device to paint to
-     * @param from the starting position
-     * @param to the ending position
+     * @param g the graphics device t paint t
+     * @param f the starting position
+     * @param t the ending position
      */
-    private void drawSelection(Graphics2D g, LogicalPosition from, LogicalPosition to) {
-        int toFillStart;
-        double scale = image.getScale();
+    private void drawSelection(Graphics2D g, LogicalPosition f, LogicalPosition t, int yOffset) {
 
-        if (from.line == to.line) toFillStart = to.column-from.column;
-        else toFillStart = getWidth() - from.column;
-        // Start to draw first line of selected block ....[----
-        drawLine(g, from.column, from.line, from.column + toFillStart, from.line, scale);
+        int fLine = Util.getLineMinusFolds(editor, f.line);
+        int tLine = Util.getLineMinusFolds(editor, t.line);
 
-        int lineDiff = Math.abs(from.line - to.line);
-        if (lineDiff >= 2) {
-            fillRectNotZero(g, 0, from.line + 1, getWidth(),
-                to.line - from.line - 1, scale);
-            // Draw finish line at next line of bottom of the box
-            int toLine =
-                CodeOutlineImage.getScaledLine(from.line + 1, scale) +
-                CodeOutlineImage.getScaledLine(to.line - from.line - 1, scale);
-            g.drawLine(0, toLine, to.column, toLine);
-        } else if (from.line != to.line) {
-            // Next line overlaps with to.line, to get next line and draw it (to prevent hiding)
-            int fromLine = CodeOutlineImage.getScaledLine(from.line, scale);
-            g.drawLine(0, fromLine + 1, to.column, fromLine + 1);
+
+        int span = Math.abs(fLine - tLine);
+        if (span == 0)
+            g.fillRect(f.column, (fLine + 1) * 2 - 1 + yOffset, t.column - f.column, 2);
+        else {
+            g.fillRect(f.column, (fLine + 1) * 2 - 1 + yOffset, getWidth() - f.column, 2);
+            g.fillRect(0, (fLine + 1) * 2 + yOffset, getWidth(), (span - 1) * 2 + 1);
+            g.fillRect(0, tLine * 2 + 1 + yOffset, t.column, 2);
         }
     }
 
-    public void fillRectNotZero(Graphics2D g, int x, int y, int width, int height, double scale) {
-        y = CodeOutlineImage.getScaledLine(y, scale);
-        height = CodeOutlineImage.getScaledLine(height, scale);
-        if (height < 1) height = 1;
-        g.fillRect(x, y, width, height);
-    }
-
-    public void fillRect(Graphics2D g, int x, int y, int width, int height, double scale) {
-        g.fillRect(x, CodeOutlineImage.getScaledLine(y, scale), width, CodeOutlineImage.getScaledLine(height, scale));
-    }
-
-    public void drawLine(Graphics2D g, int x1, int y1, int x2, int y2, double scale) {
-        g.drawLine(x1, CodeOutlineImage.getScaledLine(y1, scale), x2, CodeOutlineImage.getScaledLine(y2, scale));
-    }
 
     /**
-     * Repaints the entire code outline panel, reloading the editor text
-     * completely by recaching the file.
+     * Repaints the entire code outline panel, reloading the editor text completely by recaching the file.
      */
     public void refresh() {
         image.refreshImage();
@@ -798,29 +633,72 @@ public class CodeOutlinePanel extends JPanel {
     }
 
     protected void paintComponent(Graphics g1) {
-        final Graphics2D g = (Graphics2D) g1;
+        Dimension editorComponent = editor.getScrollPane().getViewport().getComponents()[0].getSize();
+
+        Color eBG = editor.getColorsScheme().getDefaultBackground();
+        Color caretColor = editor.getColorsScheme().getColor(EditorColors.CARET_COLOR);
+
+        Graphics2D g = (Graphics2D) g1;
+        List<Caret> carets = editor.getCaretModel().getAllCarets();
+        Rectangle visibleArea = editor.getScrollingModel().getVisibleArea();
+        double editorHeight = editorComponent.getHeight();
+        double pScrolled = visibleArea.getY() / (editorHeight - visibleArea.getHeight());
 
         // make sure the text outline image is big enough
-        image.checkImage(getGraphicsConfiguration(), getWidth(), getHeight());
+        int linesWithoutFolds = editor.getDocument().getLineCount();
+        for (int i = 0; i < editor.getFoldingModel().getAllFoldRegions().length; i++) {
+            FoldRegion f = editor.getFoldingModel().getAllFoldRegions()[i];
+            int y = editor.getDocument().getLineNumber(f.getStartOffset());
+            int z = editor.getDocument().getLineNumber(f.getEndOffset());
+            if (!f.isExpanded())
+                linesWithoutFolds -= z - y;
+        }
+        int height = (linesWithoutFolds + 6) * 2; // IDEA seems to add 6 lines to the end of the doc, maybe theres a better way to calculate this
+
+        image.repaintCode(getGraphicsConfiguration(), getWidth(), height);
+
+        BufferedImage fg = image.getFgImg();
+        BufferedImage bg = image.getBgImg();
+
+        int yOffset = (int) Math.min(-(fg.getHeight() - getHeight()) * pScrolled, 0);
 
         // fill the whole area with white
-        g.setBackground(editor.getColorsScheme().getDefaultBackground());
+        g.setBackground(eBG);
         g.clearRect(0, 0, getWidth(), getHeight());
 
-        // draw the text itself
-        image.paint(g);
+        // Draw text backgrounds
+        g.drawImage(bg, 0, yOffset, null);
 
-        // compute the area that should be painted as the visible region
-        final Rectangle visible = editor.getScrollingModel().getVisibleArea();
-        final Rectangle visibleRect = image.getImgRect(visible);
+        // draw current line
+        g.setColor(editor.getColorsScheme().getColor(EditorColors.CARET_ROW_COLOR));
+        for (Caret c : carets) {
+            g.fillRect(0, Util.getLineMinusFolds(editor, c.getLogicalPosition().line) * 2 + 1 + yOffset, getWidth(), 2);
+        }
 
-        // draw the visible area background
-        if (visibleRect != null) {
-            visibleRect.grow(1, 1);
-            g.setColor(editor.getColorsScheme().getColor(EditorColors.GUTTER_BACKGROUND));
-            g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_ATOP, 0.5f));
-            g.fill(visibleRect);
-         }
+        // draw errors/warnings
+        if (prefs.isExtendErrorHighlights()) {
+            // sort by severity and highlight things that are more severe
+            for (RangeHighlighterEx h : highlighters) {
+                if (h.isThinErrorStripeMark() || !h.isValid())
+                    continue;
+                HighlightInfo tooltip = (HighlightInfo) h.getErrorStripeTooltip();
+                if (tooltip == null)
+                    continue;
+                if (tooltip.getDescription() != null) {
+
+
+                    int y1 = editor.getDocument().getLineNumber(h.getStartOffset());
+                    int y2 = editor.getDocument().getLineNumber(h.getEndOffset());
+                    int y1f = Util.getLineMinusFolds(editor, y1);
+                    int y2f = Util.getLineMinusFolds(editor, y2);
+
+                    int dy = y2f - y1f + 1;
+                    Color errorStripeMarkColor = h.getErrorStripeMarkColor();
+                    g.setColor(errorStripeMarkColor != null ? errorStripeMarkColor : JBColor.yellow);
+                    g.fillRect(0, y1f * 2 + yOffset, getWidth(), dy * 2 + 1);
+                }
+            }
+        }
 
         // draw the right margin
         final EditorSettings editorSettings = editor.getSettings();
@@ -833,28 +711,84 @@ public class CodeOutlinePanel extends JPanel {
         // draw the selection
         final SelectionModel sm = editor.getSelectionModel();
         if (sm.hasSelection()) {
-            LogicalPosition sstart = editor.offsetToLogicalPosition(sm.getSelectionStart());
-            LogicalPosition send  = editor.offsetToLogicalPosition(sm.getSelectionEnd());
+            g.setColor(editor.getColorsScheme().getColor(EditorColors.SELECTION_BACKGROUND_COLOR));
 
-            g.setColor(editor.getColorsScheme().getColor(EditorColors.SELECTION_FOREGROUND_COLOR));
-            drawSelection(g, sstart, send);
+            int[] starts = sm.getBlockSelectionStarts();
+            int[] ends = sm.getBlockSelectionEnds();
+
+            for (int i = 0; i < starts.length; i++) {
+                LogicalPosition s = editor.offsetToLogicalPosition(starts[i]);
+                LogicalPosition e = editor.offsetToLogicalPosition(ends[i]);
+
+                drawSelection(g, s, e, yOffset);
+            }
+
         }
 
-        // draw the visible area border, over the margin and the selection
-        if (visibleRect != null) {
-            g.setColor(editor.getColorsScheme().getColor(EditorColors.RIGHT_MARGIN_COLOR));
-            g.draw(visibleRect);
+        // draw the text itself
+        g.drawImage(fg, 0, yOffset, null);
+
+        // draw caret
+        g.setColor(caretColor);
+        for (Caret c : carets) {
+            LogicalPosition logicalPosition = c.getLogicalPosition();
+            g.fillRect(logicalPosition.column, Util.getLineMinusFolds(editor, logicalPosition.line) * 2 + yOffset, 2, 4);
         }
+
+
+        Rectangle vp = getProportionalRectangle(editorComponent,
+                visibleArea, new Dimension(this.getWidth(), height), pScrolled); // TODO cache dimension
+        // mask all but viewport
+        if (prefs.isLightenCodeOutsideViewport()) {
+            Area mask = new Area(new Rectangle(this.getSize()));
+            mask.subtract(new Area(new Rectangle(vp.x, vp.y, vp.width + 1, vp.height + 1)));
+
+            g.setColor(new Color(eBG.getRed(), eBG.getGreen(), eBG.getBlue(), 180));
+            g.fill(mask);
+        }
+
+        // draw viewport
+        g.setColor(new Color(caretColor.getRed(), caretColor.getGreen(), caretColor.getBlue(), 50));
+        g.draw(vp);
+
+        if (beforePreview == null){
+            // The user isn't previewing so lets store this viewport for later when the user may preview another area
+            previousViewport = vp;
+        }else{
+            if (previousViewport != null) {
+                // The user is previewing a different part of the code, let's draw the old region in gray
+                g.setColor(new Color(caretColor.getRed(), caretColor.getGreen(), caretColor.getBlue(), 20));
+                g.fill(previousViewport);
+            }
+        }
+
+
+
+
     }
 
-    /**
-     * An action that {@linkplain CodeOutlinePanel#refresh() refreshes} the
-     * display, reloading the editor text completely.
-     */
+    private Dimension shrinkHeight(Dimension size, int i) {
+        return new Dimension(size.width, Math.min(size.height, i));
+    }
+
+    private Rectangle getProportionalRectangle(Dimension outer, Rectangle inner, Dimension targetOuter, double pScrolled) {
+        double x;
+        double y;
+        double height;
+        double width;
+        double pH = targetOuter.getHeight() / (outer.getHeight());
+        double pW = targetOuter.getWidth() / outer.getWidth();
+
+
+        height = inner.getHeight() * pH;
+        width = inner.getWidth() / inner.getHeight() * height * 1.22; // TODO 1.22 is a hack
+        x = inner.getX() * pW;
+        y = (Math.min(getHeight(), targetOuter.getHeight()) - height) * pScrolled;
+
+        return new Rectangle((int) x, (int) y, (int) width, (int) height);
+    }
+
     private class RefreshAction extends AbstractAction {
-        /**
-         * Creates a new Refresh action.
-         */
         public RefreshAction() {
             super("Refresh");
             putValue(AbstractAction.MNEMONIC_KEY, new Integer(KeyEvent.VK_R));
@@ -864,36 +798,48 @@ public class CodeOutlinePanel extends JPanel {
             refresh();
         }
     }
-    /**
-     * An action that updates the animated scrolling option.
-     */
+
     private class AnimateOptionAction extends AbstractAction {
-        /**
-         * Creates a new animation preference update action.
-         */
         public AnimateOptionAction() {
             super("Animated Scroll");
             putValue(MNEMONIC_KEY, new Integer(KeyEvent.VK_A));
         }
 
         public void actionPerformed(ActionEvent e) {
-            prefs.setAnimated(animatedMenuItem.isSelected());
+            prefs.setAnimated(animatedScrollingMenuItem.isSelected());
         }
     }
-    /**
-     * An action that updates the highlight current line option.
-     */
+
     private class HighlightOptionAction extends AbstractAction {
-        /**
-         * Creates a new highlight current line preference update action.
-         */
         public HighlightOptionAction() {
             super("Highlight Current Line");
             putValue(MNEMONIC_KEY, new Integer(KeyEvent.VK_H));
         }
 
         public void actionPerformed(ActionEvent e) {
-            prefs.setHighlightLine(highlightMenuItem.isSelected());
+            prefs.setHighlightLine(highlightCurrentLineMenuItem.isSelected());
         }
     }
+
+    private class ExtendErrorHighlightsOptionAction extends AbstractAction {
+        public ExtendErrorHighlightsOptionAction() {
+            super("Extend error highlights accross entire line");
+            putValue(MNEMONIC_KEY, new Integer(KeyEvent.VK_E));
+        }
+
+        public void actionPerformed(ActionEvent e) {
+            prefs.setExtendErrorHighlights(extendErrorHighlightsMenuItem.isSelected());
+        }
+    }
+    private class LightenCodeOutsideViewportOptionAction extends AbstractAction {
+        public LightenCodeOutsideViewportOptionAction() {
+            super("Lighten code outside viewport");
+            putValue(MNEMONIC_KEY, new Integer(KeyEvent.VK_L));
+        }
+
+        public void actionPerformed(ActionEvent e) {
+            prefs.setLightenCodeOutsideViewport(lightenCodeOutsideViewportMenuItem.isSelected());
+        }
+    }
+
 }
